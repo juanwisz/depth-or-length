@@ -174,8 +174,18 @@ def extract_math_answer(text: str) -> Optional[str]:
     """Extract answer from \\boxed{} or common math patterns.
 
     Based on DeepSeek-Math extraction logic.
+    For DeepSeek-R1 models: preferentially extract from post-</think> section.
     """
-    # Try \boxed{} first (most reliable)
+    # For DeepSeek-R1: prefer answer from post-think section
+    post_think = text
+    if '</think>' in text:
+        post_think = text.split('</think>')[-1]
+        # Try boxed in post-think first
+        boxed_post = re.findall(r'\\boxed\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}', post_think)
+        if boxed_post:
+            return boxed_post[-1].strip()
+
+    # Fall back to last boxed in full text
     boxed_matches = re.findall(r'\\boxed\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}', text)
     if boxed_matches:
         return boxed_matches[-1].strip()

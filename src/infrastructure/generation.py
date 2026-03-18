@@ -269,11 +269,24 @@ def normalize_math_answer(answer: str) -> str:
     # Remove whitespace, $, \text{}, etc.
     s = answer.strip()
     s = s.replace('$', '')
-    s = s.replace('\\text{', '').replace('}', '')
+    s = re.sub(r'\\text\{([^}]*)\}', r'\1', s)  # \text{foo} -> foo
     s = s.replace('\\%', '')
     s = s.replace('%', '')
     s = s.replace(' ', '')
     s = s.replace(',', '')  # Remove thousands separator
+
+    # Try fraction BEFORE stripping braces
+    frac_match = re.match(r'^\\?frac\{([^}]+)\}\{([^}]+)\}$', s)
+    if frac_match:
+        try:
+            num, den = float(frac_match.group(1)), float(frac_match.group(2))
+            if den != 0:
+                val = num / den
+                if val == int(val):
+                    return str(int(val))
+                return str(val)
+        except ValueError:
+            pass
 
     # Try to parse as number
     try:
@@ -284,16 +297,6 @@ def normalize_math_answer(answer: str) -> str:
         return str(val)
     except ValueError:
         pass
-
-    # Try fraction
-    frac_match = re.match(r'^\\?frac\{(\d+)\}\{(\d+)\}$', s)
-    if frac_match:
-        num, den = int(frac_match.group(1)), int(frac_match.group(2))
-        if den != 0:
-            val = num / den
-            if val == int(val):
-                return str(int(val))
-            return str(val)
 
     return s.lower()
 

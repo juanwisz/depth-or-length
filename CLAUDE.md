@@ -108,6 +108,15 @@ The workflow is: **develop locally → test locally → push to GitHub → Colab
 - **Therefore, must triage.** Priority order: (1) Pilot, (2) Decomposition on primary model, (3) Decomposition on 2nd model, (4) Surface on primary model. Everything else is stretch.
 - If credits run low, reduce: fewer FLOP levels (3 instead of 5), fewer benchmarks (MATH-500 + GPQA only, skip MMLU-Pro), fewer models (2 instead of 3).
 
+### Colab Monitoring — IMPORTANT
+When checking experiment progress via Colab terminal:
+- **Google Drive caches aggressively.** `ls -la` timestamps and file sizes can be stale by minutes.
+- **Use `wc -l` on the JSONL** — it reads actual content and is reliable.
+- **The `watch` command output may show cached results.** Don't panic if numbers don't update every cycle.
+- **Don't poll more than once every 5 minutes.** The experiment runs autonomously. Polling wastes time and yields stale data.
+- **The experiment is crash-safe.** JSONL on Drive + `--resume` means no work is lost. If something looks stuck, check `ps aux | grep run_experiment` to confirm the process is alive, then leave it alone.
+- **Focus on local work while Colab runs.** Analysis scripts, figure generation, and code fixes don't need GPU. Do those in parallel.
+
 ### Models (all HuggingFace, all fit in A100-40GB in fp16/bf16)
 - **Reasoning (primary)**: `deepseek-ai/DeepSeek-R1-Distill-Qwen-7B`
 - **Reasoning (secondary)**: `deepseek-ai/DeepSeek-R1-Distill-Llama-8B`

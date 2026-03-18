@@ -30,20 +30,22 @@ import time
 
 import torch
 
-# Add project root to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+# Add project root to path (works from both repo root and src/experiments/)
+_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+sys.path.insert(0, _project_root)
+sys.path.insert(0, os.path.join(_project_root, 'src'))
 
-from src.infrastructure.model_loader import load_model_and_tokenizer, resolve_model_name, get_model_info
-from src.infrastructure.generation import (
+from infrastructure.model_loader import load_model_and_tokenizer, resolve_model_name, get_model_info
+from infrastructure.generation import (
     generate_with_budget, extract_answer, check_answer_correct, find_horl,
 )
-from src.infrastructure.checkpoint import (
+from infrastructure.checkpoint import (
     get_experiment_id, load_completed, append_result,
     save_run_metadata, save_crash_log,
 )
-from src.depth_control.skip_manager import get_skip_layers, apply_skip
-from src.depth_control.flop_counter import compute_total_flops, get_architecture
-from src.benchmarks.loader import load_benchmark
+from depth_control.skip_manager import get_skip_layers, apply_skip
+from depth_control.flop_counter import compute_total_flops, get_architecture
+from benchmarks.loader import load_benchmark
 
 
 logging.basicConfig(
@@ -165,7 +167,7 @@ def main():
 
     # Get num_layers if not already known
     if num_layers is None:
-        from src.infrastructure.model_loader import get_layer_modules
+        from infrastructure.model_loader import get_layer_modules
         num_layers = len(get_layer_modules(model))
 
     # Compute skip layers

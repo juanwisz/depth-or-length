@@ -19,9 +19,11 @@ from typing import Dict, Optional, List, Tuple
 
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+sys.path.insert(0, _project_root)
+sys.path.insert(0, os.path.join(_project_root, 'src'))
 
-from src.depth_control.skip_manager import apply_skip, get_skip_layers
+from depth_control.skip_manager import apply_skip, get_skip_layers
 
 
 def speculative_decode(
@@ -58,7 +60,7 @@ def speculative_decode(
     device = next(model.parameters()).device
 
     # Determine skip layers
-    from src.infrastructure.model_loader import get_layer_modules
+    from infrastructure.model_loader import get_layer_modules
     num_layers = len(get_layer_modules(model))
     skip_layers = get_skip_layers(
         num_layers, draft_skip_pct,
@@ -202,7 +204,7 @@ def compare_speculative_methods(
         results["full_layer"].append(full_result)
 
         # Baseline: no speculative decoding
-        from src.infrastructure.generation import generate_with_budget
+        from infrastructure.generation import generate_with_budget
         baseline = generate_with_budget(model, tokenizer, prompt)
         results["baseline"].append(baseline)
 

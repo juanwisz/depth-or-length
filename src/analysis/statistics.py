@@ -181,7 +181,7 @@ def horl_analysis(df: pd.DataFrame, benchmark: str) -> Dict:
 
 def full_statistical_report(results_dir: str) -> str:
     """Generate a full statistical report from results."""
-    from src.analysis.figures import load_results
+    from analysis.figures import load_results
 
     df = load_results(results_dir)
     if df.empty:

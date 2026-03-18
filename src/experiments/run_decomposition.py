@@ -19,9 +19,11 @@ import os
 import sys
 import subprocess
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+_project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+sys.path.insert(0, _project_root)
+sys.path.insert(0, os.path.join(_project_root, 'src'))
 
-from src.depth_control.flop_counter import find_iso_flop_configs, get_architecture
+from depth_control.flop_counter import find_iso_flop_configs, get_architecture
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)

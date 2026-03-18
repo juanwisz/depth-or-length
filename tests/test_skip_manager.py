@@ -92,11 +92,10 @@ class TestIdentityModules:
         x = torch.randn(2, 10, 64)
         out = attn(x)
         assert isinstance(out, tuple)
-        assert len(out) == 3
+        assert len(out) == 2
         assert out[0].shape == x.shape
         assert torch.all(out[0] == 0)
         assert out[1] is None
-        assert out[2] is None
 
 
 # ── Mock model for apply_skip tests ──
@@ -117,7 +116,7 @@ class MockAttention(nn.Module):
         self.linear = nn.Linear(dim, dim)
 
     def forward(self, hidden_states, **kwargs):
-        return self.linear(hidden_states), None, None
+        return self.linear(hidden_states), None
 
 
 class MockLayer(nn.Module):
@@ -131,13 +130,13 @@ class MockLayer(nn.Module):
     def forward(self, hidden_states, **kwargs):
         residual = hidden_states
         h = self.input_layernorm(hidden_states)
-        attn_out, _, _ = self.self_attn(h)
+        attn_out, _ = self.self_attn(h)
         h = residual + attn_out
 
         residual = h
         h = self.post_attention_layernorm(h)
         h = residual + self.mlp(h)
-        return (h,) + (None,) * 2
+        return h
 
 
 class MockModel(nn.Module):
@@ -182,16 +181,16 @@ class TestApplySkip:
         layer = self.model.model.layers[4]
         x = torch.randn(1, 5, 32)
 
-        # Normal output
-        normal_out, _, _ = layer(x)
+        # Normal output (single tensor for modern transformers)
+        normal_out = layer(x)
 
         with apply_skip(self.model, 'full_layer', [4]):
-            skip_out, _, _ = layer(x)
+            skip_out = layer(x)
             # Full-layer skip returns input unchanged
             assert torch.allclose(skip_out, x, atol=1e-6)
 
         # After restore, normal behavior returns
-        restored_out, _, _ = layer(x)
+        restored_out = layer(x)
         assert torch.allclose(restored_out, normal_out, atol=1e-6)
 
     def test_multiple_layers_skipped(self):
@@ -220,14 +219,14 @@ class TestApplySkip:
         # Run without skip
         h = self.x.clone()
         for layer in self.model.model.layers:
-            h, _, _ = layer(h)
+            h = layer(h)
         out_normal = h.clone()
 
         # Run with FFN skip on middle layers
         h = self.x.clone()
         with apply_skip(self.model, 'ffn_only', [3, 4, 5]):
             for layer in self.model.model.layers:
-                h, _, _ = layer(h)
+                h = layer(h)
         out_skip = h.clone()
 
         assert not torch.allclose(out_normal, out_skip, atol=1e-6), \

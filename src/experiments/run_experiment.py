@@ -92,8 +92,10 @@ def parse_args():
 
     # Generation
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--temperature", type=float, default=0.0,
-                        help="0 = greedy decoding")
+    parser.add_argument("--temperature", type=float, default=0.6,
+                        help="Sampling temperature. 0.6 matches DeepSeek-R1 published config.")
+    parser.add_argument("--top_p", type=float, default=0.95,
+                        help="Top-p sampling. 0.95 matches DeepSeek-R1 published config.")
 
     # Output
     parser.add_argument("--output_dir", type=str, required=True,
@@ -229,23 +231,19 @@ def main():
             logger.info(f"[{i+1}/{len(problems)}] {pid}")
 
             # Generate with skip applied
+            gen_kwargs = dict(
+                prompt=problem["prompt"],
+                token_budget=args.token_budget,
+                benchmark_type=bench_type,
+                seed=args.seed,
+                temperature=args.temperature,
+                top_p=args.top_p,
+            )
             if skip_layers and args.skip_type != "none":
                 with apply_skip(model, args.skip_type, skip_layers):
-                    gen_result = generate_with_budget(
-                        model, tokenizer,
-                        prompt=problem["prompt"],
-                        token_budget=args.token_budget,
-                        benchmark_type=bench_type,
-                        seed=args.seed,
-                    )
+                    gen_result = generate_with_budget(model, tokenizer, **gen_kwargs)
             else:
-                gen_result = generate_with_budget(
-                    model, tokenizer,
-                    prompt=problem["prompt"],
-                    token_budget=args.token_budget,
-                    benchmark_type=bench_type,
-                    seed=args.seed,
-                )
+                gen_result = generate_with_budget(model, tokenizer, **gen_kwargs)
 
             # Extract and check answer
             extracted = extract_answer(gen_result["generation_text"], bench_type)

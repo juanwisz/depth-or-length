@@ -62,6 +62,8 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--temperature", type=float, default=0.6)
+    parser.add_argument("--top_p", type=float, default=0.95)
     parser.add_argument("--dtype", type=str, default="auto")
     parser.add_argument("--quantize_4bit", action="store_true")
     parser.add_argument("--cold_start", type=int, default=4)
@@ -79,6 +81,7 @@ def run_condition(
     model, tokenizer, problems, skip_type, skip_pct,
     benchmark, token_budget, seed, output_dir,
     cold_start, cold_end, hf_name, resume,
+    temperature=0.6, top_p=0.95,
 ):
     """Run one condition on all problems."""
     experiment_id = get_experiment_id(
@@ -136,23 +139,19 @@ def run_condition(
         pid = problem["problem_id"]
         logger.info(f"  [{i+1}/{len(remaining)}] {pid}")
 
+        gen_kwargs = dict(
+            prompt=problem["prompt"],
+            token_budget=token_budget,
+            benchmark_type=bench_type,
+            seed=seed,
+            temperature=temperature,
+            top_p=top_p,
+        )
         if skip_layers and skip_type != "none":
             with apply_skip(model, skip_type, skip_layers):
-                gen_result = generate_with_budget(
-                    model, tokenizer,
-                    prompt=problem["prompt"],
-                    token_budget=token_budget,
-                    benchmark_type=bench_type,
-                    seed=seed,
-                )
+                gen_result = generate_with_budget(model, tokenizer, **gen_kwargs)
         else:
-            gen_result = generate_with_budget(
-                model, tokenizer,
-                prompt=problem["prompt"],
-                token_budget=token_budget,
-                benchmark_type=bench_type,
-                seed=seed,
-            )
+            gen_result = generate_with_budget(model, tokenizer, **gen_kwargs)
 
         extracted = extract_answer(gen_result["generation_text"], bench_type)
         is_correct = check_answer_correct(extracted, problem["ground_truth"], bench_type)
@@ -247,6 +246,7 @@ def main():
                 args.benchmark, args.token_budget, args.seed,
                 args.output_dir, args.cold_start, args.cold_end,
                 hf_name, args.resume,
+                temperature=args.temperature, top_p=args.top_p,
             )
         except Exception as e:
             logger.error(f"Condition {skip_type}@{skip_pct}% FAILED: {e}")

@@ -60,8 +60,15 @@ def generate_with_budget(
 
     device = next(model.parameters()).device
 
-    # Tokenize input
-    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+    # Tokenize input — use chat template if available
+    if hasattr(tokenizer, 'apply_chat_template') and tokenizer.chat_template:
+        messages = [{"role": "user", "content": prompt}]
+        input_ids = tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, return_tensors="pt",
+        ).to(device)
+        inputs = {"input_ids": input_ids}
+    else:
+        inputs = tokenizer(prompt, return_tensors="pt").to(device)
     input_len = inputs["input_ids"].shape[1]
 
     # Generation kwargs
@@ -73,11 +80,11 @@ def generate_with_budget(
     # Remove None values
     gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
 
-    # Set max tokens
+    # Set max tokens — DeepSeek-R1 uses 32768 by default
     if token_budget is not None:
         max_new = token_budget
     else:
-        max_new = 8192  # Default max for unlimited
+        max_new = 32768  # Match DeepSeek-R1 published config
 
     start_time = time.time()
 
@@ -274,14 +281,17 @@ def normalize_math_answer(answer: str) -> str:
     s = s.replace('%', '')
     s = s.replace(' ', '')
     s = s.replace(',', '')  # Remove thousands separator
+    s = s.replace('\\dfrac', '\\frac')  # Normalize \dfrac to \frac
+    s = s.replace('\\tfrac', '\\frac')  # Normalize \tfrac to \frac
 
-    # Try fraction BEFORE stripping braces
-    frac_match = re.match(r'^\\?frac\{([^}]+)\}\{([^}]+)\}$', s)
+    # Try fraction BEFORE stripping braces — handle optional leading minus sign
+    frac_match = re.match(r'^(-?)\\?frac\{([^}]+)\}\{([^}]+)\}$', s)
     if frac_match:
         try:
-            num, den = float(frac_match.group(1)), float(frac_match.group(2))
+            sign = -1 if frac_match.group(1) == '-' else 1
+            num, den = float(frac_match.group(2)), float(frac_match.group(3))
             if den != 0:
-                val = num / den
+                val = sign * num / den
                 if val == int(val):
                     return str(int(val))
                 return str(val)

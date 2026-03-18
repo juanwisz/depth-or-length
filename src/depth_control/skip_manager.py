@@ -105,10 +105,11 @@ class _IdentityModule(nn.Module):
 
 
 class _IdentityAttention(nn.Module):
-    """Identity attention that returns zeros + empty cache.
+    """Identity attention that returns zeros.
 
-    Attention forward returns (output, attention_weights, past_key_value).
-    We return zeros for output, None for weights, None for cache.
+    Attention output goes through residual: hidden = hidden + attn(norm(hidden)).
+    Return zeros so the residual is preserved. Return format must match
+    the model's attention return: (attn_output, attn_weights) for Qwen2/Llama.
     """
     def forward(self, *args, **kwargs):
         if args:
@@ -118,7 +119,7 @@ class _IdentityAttention(nn.Module):
         else:
             raise ValueError("Cannot determine hidden_states from args")
         zeros = torch.zeros_like(hidden_states)
-        return zeros, None, None
+        return zeros, None
 
 
 @contextmanager
@@ -224,10 +225,14 @@ def _make_identity_layer_forward(layer):
         hidden = hidden + mlp(norm2(hidden))
 
     We replace it with: just return hidden_states unchanged.
+    Must match the actual return format of the model's layer forward.
     """
+    # Probe what the original forward returns to match its format
+    # Modern transformers (Qwen2, Llama) return just hidden_states tensor
+    # Older models may return tuples
+    original_forward = layer.forward
+
     def identity_forward(hidden_states, **kwargs):
-        # Return in the format expected by the model
-        # Most models return a tuple: (hidden_states, ...) or a BaseModelOutputWithPast
-        return (hidden_states,) + (None,) * 2  # (hidden_states, attn_weights, past_kv)
+        return hidden_states
 
     return identity_forward

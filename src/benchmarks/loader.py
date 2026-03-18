@@ -273,10 +273,8 @@ def _format_math_prompt(problem: str) -> str:
     Uses a simple prompt that works well with DeepSeek-R1 reasoning models.
     """
     return (
-        f"Please solve the following math problem step by step. "
-        f"Put your final answer in \\boxed{{}}.\n\n"
-        f"Problem: {problem}\n\n"
-        f"Solution:"
+        f"{problem}\n\n"
+        f"Please reason step by step, and put your final answer within \\boxed{{}}."
     )
 
 

@@ -57,13 +57,56 @@ Claude is autonomously pursuing an EMNLP 2026 main conference paper. This sectio
 - Claude may read any PDF in `papers_early_exit/` **without asking**.
 - Claude should still **ask before**: any git push, any external API call that costs money, any deletion of existing files, any commit to main.
 
+### Development Philosophy: Local First, Colab Only for GPU
+**CRITICAL: 99% of development and testing happens LOCALLY. Colab is ONLY for GPU inference.**
+
+DO NOT:
+- Develop code in Colab notebook cells. That's a recipe for wasted credits and untestable spaghetti.
+- Try to cram the entire codebase into notebook cells with `%%writefile`.
+- Connect to a Colab GPU runtime until the code is fully tested and validated locally.
+- Keep a GPU runtime alive while debugging. That burns credits for nothing.
+
+DO:
+- Write all code locally in the `src/` directory.
+- Test locally without GPU: benchmark loading, answer extraction, FLOP counting, skip layer scheduling, checkpointing, JSONL parsing, analysis scripts, figure generation — **none of these need a GPU.**
+- Use mock/dummy data to validate the full pipeline locally before touching Colab.
+- Push tested code to GitHub. The Colab notebook is a ~20-line launcher that clones the repo and runs a self-contained script. No experiment logic in notebooks.
+- Only connect to Colab A100 when you have a specific, tested experiment script ready to run. Load model, run all configs in one session, save results to Drive, disconnect immediately.
+- Run analysis locally on downloaded JSONL files. Colab is GPU-only.
+
+The workflow is: **develop locally → test locally → push to GitHub → Colab clones + runs → results to Drive → analyze locally.**
+
 ### Hardware & Execution Model
-- **Primary**: Google Colab with A100 (40GB), accessed via computer use.
+- **Primary**: Google Colab Pro with A100 (80GB), accessed via computer use.
 - **Colab is stateless.** Treat every session as a lambda: clone repo, run script, save to Drive, die. Nothing lives only in Colab.
 - **Code** lives in a GitHub repo (source of truth). Colab notebook is a ~20-line launcher that clones the repo and runs a script. No experiment logic in notebooks.
 - **Data** lives on Google Drive (append-only JSONL per experiment). Every problem saves immediately. `--resume` flag skips completed work on restart.
 - **Every run saves**: full generation text, extracted answers, accuracy, actual token counts, wall-clock time, GPU info, git SHA, full config. Plus logs, metadata, and crash dumps.
 - **Analysis runs locally** on downloaded JSONL. Colab is GPU-only.
+
+### Compute Credit Management — CRITICAL
+**Colab Pro compute units are FINITE. If we run out, the paper is dead.** Every GPU hour costs credits. A100 is the most expensive tier. Mismanaging credits = no experiments = no paper.
+
+**Rules for Claude:**
+1. **NEVER leave a runtime idle.** Disconnect immediately after experiments finish. An idle A100 burns credits for nothing.
+2. **NEVER re-run completed experiments.** Always use `--resume`. The JSONL checkpointing exists precisely to avoid wasting credits on redundant work.
+3. **Batch experiments efficiently.** Load the model ONCE per session, then run as many configs through it as possible before disconnecting. Model loading takes ~2-3 minutes — don't reload for every single config.
+4. **Pilot BEFORE scaling.** Run Phase 1 pilot (small grid, MATH-500 only) to confirm signal BEFORE committing credits to the full Phase 2 grid. If the pilot shows no signal, STOP and discuss — don't burn credits on a dead direction.
+5. **Use smaller GPUs when possible.** Analysis, plotting, and data processing run on CPU. Only use A100 for actual model inference. Consider T4/L4 for smaller experiments or validation runs where A100 isn't needed.
+6. **Monitor credit balance.** Check remaining compute units at the start of each session (Runtime → View resources or the resource panel). Log the balance. If credits are running low, prioritize: (a) finish the decomposition finding (LEAD), (b) skip the surface if needed, (c) use fewer models.
+7. **Estimate costs before running.** Rough estimates: A100 ≈ ~7 compute units/hour. Full pilot ≈ 5h = ~35 units. Full decomposition ≈ 30h = ~210 units. Full surface ≈ 25h = ~175 units. Plan accordingly.
+8. **Save the generation text but keep it compact.** Long reasoning traces can produce multi-MB JSONL files. This is fine for Drive storage but be aware of it.
+9. **If credits get critically low (<50 units):** Switch to T4 with 4-bit quantization. It's 3-4x slower but uses fewer credits. Prioritize completing the LEAD finding (decomposition) over everything else.
+
+**Current budget (as of 2026-03-18):** 300 compute units on Colab Pro. This is enough for roughly ~40 hours of A100 time. Budget allocation plan:
+- Phase 1 pilot: ~5h → ~35 units (MUST DO)
+- Phase 2 decomposition (3 models × MATH+GPQA): ~30h → ~210 units (LEAD FINDING — priority)
+- Phase 2 surface: ~25h → ~175 units (SUPPORTING — do only if credits allow)
+- Phase 3 baselines: ~5h → ~35 units
+- Phase 5 robustness: ~10h → ~70 units
+- **TOTAL ESTIMATED: ~75h → ~525 units — EXCEEDS BUDGET.**
+- **Therefore, must triage.** Priority order: (1) Pilot, (2) Decomposition on primary model, (3) Decomposition on 2nd model, (4) Surface on primary model. Everything else is stretch.
+- If credits run low, reduce: fewer FLOP levels (3 instead of 5), fewer benchmarks (MATH-500 + GPQA only, skip MMLU-Pro), fewer models (2 instead of 3).
 
 ### Models (all HuggingFace, all fit in A100-40GB in fp16/bf16)
 - **Reasoning (primary)**: `deepseek-ai/DeepSeek-R1-Distill-Qwen-7B`

@@ -60,13 +60,19 @@ def _load_math500() -> List[Dict]:
     Uses the HuggingFace datasets version of MATH (Hendrycks et al.).
     We use a fixed 500-problem subset for consistency.
     """
-    try:
-        ds = load_dataset("HuggingFaceTB/MATH-500", split="test")
-    except Exception:
-        # Fallback: try the full MATH dataset and take 500
-        ds = load_dataset("hendrycks/competition_math", split="test")
-        # Take first 500 for determinism
-        ds = ds.select(range(min(500, len(ds))))
+    # Try multiple dataset sources
+    ds = None
+    for name in ["lighteval/MATH-Hard", "hendrycks/competition_math"]:
+        try:
+            ds = load_dataset(name, split="test")
+            break
+        except Exception:
+            continue
+    if ds is None:
+        raise RuntimeError("Could not load any MATH dataset")
+    # Take first 500 for determinism (MATH-500 subset)
+    if len(ds) > 500:
+        ds = ds.select(range(500))
 
     problems = []
     for i, item in enumerate(ds):
@@ -97,11 +103,24 @@ def _load_math500() -> List[Dict]:
 
 def _load_gpqa_diamond() -> List[Dict]:
     """Load GPQA Diamond (198 graduate-level science questions)."""
-    try:
-        ds = load_dataset("Idavidrein/gpqa", "gpqa_diamond", split="train")
-    except Exception:
-        # Alternative name
-        ds = load_dataset("gpqa/gpqa", "diamond", split="train")
+    # GPQA is a gated dataset — requires HF token
+    ds = None
+    for name, config, split in [
+        ("Idavidrein/gpqa", "gpqa_diamond", "train"),
+        ("gpqa/gpqa", "diamond", "train"),
+        ("Idavidrein/gpqa", "gpqa_diamond", "test"),
+    ]:
+        try:
+            ds = load_dataset(name, config, split=split)
+            break
+        except Exception:
+            continue
+    if ds is None:
+        raise RuntimeError(
+            "Could not load GPQA. This is a gated dataset — "
+            "you need to accept the license at https://huggingface.co/datasets/Idavidrein/gpqa "
+            "and set HF_TOKEN environment variable."
+        )
 
     problems = []
     for i, item in enumerate(ds):

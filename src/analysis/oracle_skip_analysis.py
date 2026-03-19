@@ -83,45 +83,33 @@ def run_oracle_analysis(
             break
 
         # Step 2: For each skippable layer, test if skipping changes prediction
+        # Use hook-based approach: register a hook on the target layer that
+        # makes it a passthrough (returns input unchanged), then run full forward.
         position_skip = []
+        layers = model.model.layers
+
         for layer_idx in range(num_layers):
             if layer_idx < warmup_layers:
-                # Never skip warmup layers
                 position_skip.append(0)
                 continue
 
-            # Get hidden state BEFORE this layer (from full model)
-            # hidden_states[k] is the output of layer k-1 (or embedding for k=0)
-            # hidden_states[layer_idx] = input to layer layer_idx
-            h_before = hidden_states[layer_idx]  # shape: (1, seq_len, hidden_dim)
+            # Register skip hook on this layer
+            def skip_hook(module, args, output, **kwargs):
+                # Return input hidden_states as output, keep other outputs
+                h_in = args[0]
+                if isinstance(output, tuple):
+                    return (h_in,) + output[1:]
+                return h_in
 
-            # Skip this layer: pass h_before directly to layer_idx+1
-            # Then run layers layer_idx+1 through num_layers-1
-            h = h_before
-            layers = model.model.layers
-            seq_len = h.shape[1]
-            position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
+            hook = layers[layer_idx].register_forward_hook(skip_hook)
 
-            # Compute position embeddings (needed by Qwen2/Llama layers)
-            if hasattr(model.model, 'rotary_emb'):
-                head_dim = model.config.hidden_size // model.config.num_attention_heads
-                dummy = torch.zeros(1, seq_len, head_dim, device=device, dtype=h.dtype)
-                position_embeddings = model.model.rotary_emb(dummy, position_ids)
-            else:
-                position_embeddings = None
+            # Run full model forward with this one layer skipped
+            with torch.no_grad():
+                skip_outputs = model(current_ids, use_cache=False)
 
-            for k in range(layer_idx + 1, num_layers):
-                kwargs = {"use_cache": False}
-                if position_embeddings is not None:
-                    kwargs["position_embeddings"] = position_embeddings
-                else:
-                    kwargs["position_ids"] = position_ids
-                layer_out = layers[k](h, **kwargs)
-                h = layer_out[0]
+            hook.remove()
 
-            # Final norm + lm_head
-            h = model.model.norm(h)
-            skip_logits = model.lm_head(h)[0, -1, :]
+            skip_logits = skip_outputs.logits[0, -1, :]
             skip_pred = skip_logits.argmax().item()
 
             # Does skipping this layer change the prediction?

@@ -208,13 +208,10 @@ def main():
 
     # Tokenize with chat template
     messages = [{"role": "user", "content": prompt}]
-    input_ids = tokenizer.apply_chat_template(
-        messages, add_generation_prompt=True, return_tensors="pt",
+    token_ids = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True,
     )
-    if not isinstance(input_ids, torch.Tensor):
-        input_ids = torch.tensor([input_ids]) if isinstance(input_ids, list) else input_ids
-    if input_ids.dim() == 1:
-        input_ids = input_ids.unsqueeze(0)
+    input_ids = torch.tensor([token_ids], dtype=torch.long)
     input_ids = input_ids.to(model.device)
 
     print(f"Input tokens: {input_ids.shape[1]}")

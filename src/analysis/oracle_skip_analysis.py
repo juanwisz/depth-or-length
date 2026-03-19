@@ -102,12 +102,18 @@ def run_oracle_analysis(
             seq_len = h.shape[1]
             position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
 
+            # Compute position embeddings (needed by Qwen2/Llama layers)
+            position_embeddings = None
+            if hasattr(model.model, 'rotary_emb'):
+                position_embeddings = model.model.rotary_emb(h, position_ids)
+
             for k in range(layer_idx + 1, num_layers):
-                layer_out = layers[k](
-                    h,
-                    position_ids=position_ids,
-                    use_cache=False,
-                )
+                kwargs = {"use_cache": False}
+                if position_embeddings is not None:
+                    kwargs["position_embeddings"] = position_embeddings
+                else:
+                    kwargs["position_ids"] = position_ids
+                layer_out = layers[k](h, **kwargs)
                 h = layer_out[0]
 
             # Final norm + lm_head

@@ -64,27 +64,37 @@ def run_oracle_analysis(
     generated_ids = []
 
     current_ids = input_ids.clone()
+    past_kv = None  # KV cache for autoregressive generation
 
     for pos_idx in range(max_new_tokens):
-        # Step 1: Full forward pass to get correct prediction and hidden states
+        # Step 1: Full forward pass with KV cache
         with torch.no_grad():
-            outputs = model(
-                current_ids,
-                output_hidden_states=True,
-                use_cache=False,
-            )
+            if past_kv is None:
+                # First token: process full prompt
+                outputs = model(
+                    current_ids,
+                    use_cache=True,
+                )
+            else:
+                # Subsequent tokens: only process the new token
+                outputs = model(
+                    current_ids[:, -1:],
+                    past_key_values=past_kv,
+                    use_cache=True,
+                )
 
-        full_logits = outputs.logits[0, -1, :]  # logits for next token
+        full_logits = outputs.logits[0, -1, :]
         full_pred = full_logits.argmax().item()
-        hidden_states = outputs.hidden_states  # tuple of (num_layers+1) tensors
+        past_kv = outputs.past_key_values
 
         # Check for EOS
         if full_pred == tokenizer.eos_token_id:
             break
 
         # Step 2: For each skippable layer, test if skipping changes prediction
-        # Use hook-based approach: register a hook on the target layer that
-        # makes it a passthrough (returns input unchanged), then run full forward.
+        # Use hook-based approach with KV cache: for each skip test, we forward
+        # only the LAST token with past_key_values, but with one layer hooked
+        # to passthrough. This is O(1) per token per layer, not O(seq_len).
         position_skip = []
         layers = model.model.layers
 
@@ -93,9 +103,7 @@ def run_oracle_analysis(
                 position_skip.append(0)
                 continue
 
-            # Register skip hook on this layer
             def skip_hook(module, args, output, **kwargs):
-                # Return input hidden_states as output, keep other outputs
                 h_in = args[0]
                 if isinstance(output, tuple):
                     return (h_in,) + output[1:]
@@ -103,16 +111,19 @@ def run_oracle_analysis(
 
             hook = layers[layer_idx].register_forward_hook(skip_hook)
 
-            # Run full model forward with this one layer skipped
+            # Forward only the last token with cached KV from full model
             with torch.no_grad():
-                skip_outputs = model(current_ids, use_cache=False)
+                skip_outputs = model(
+                    current_ids[:, -1:],
+                    past_key_values=past_kv,
+                    use_cache=False,
+                )
 
             hook.remove()
 
             skip_logits = skip_outputs.logits[0, -1, :]
             skip_pred = skip_logits.argmax().item()
 
-            # Does skipping this layer change the prediction?
             position_skip.append(1 if skip_pred == full_pred else 0)
 
         skip_matrix.append(position_skip)

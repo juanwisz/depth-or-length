@@ -99,10 +99,13 @@ def run_oracle_analysis(
             # Then run layers layer_idx+1 through num_layers-1
             h = h_before
             layers = model.model.layers
+            seq_len = h.shape[1]
+            position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
 
             for k in range(layer_idx + 1, num_layers):
                 layer_out = layers[k](
                     h,
+                    position_ids=position_ids,
                     use_cache=False,
                 )
                 h = layer_out[0]
@@ -208,6 +211,8 @@ def main():
     input_ids = tokenizer.apply_chat_template(
         messages, add_generation_prompt=True, return_tensors="pt",
     )
+    if not isinstance(input_ids, torch.Tensor):
+        input_ids = torch.tensor([input_ids]) if isinstance(input_ids, list) else input_ids
     if input_ids.dim() == 1:
         input_ids = input_ids.unsqueeze(0)
     input_ids = input_ids.to(model.device)

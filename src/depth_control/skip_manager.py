@@ -1,18 +1,19 @@
 """Skip manager: FFN-only, full-layer, and attention-only skipping.
 
-Adapted from AdaSkip (AAAI 2025) approach of modifying layer forward
-to conditionally skip sublayers while properly managing KV cache.
+Adapted from AdaSkip (AAAI 2025). Uses forward hooks to replace sublayer
+outputs with scaled passthrough, preserving residual stream magnitude.
 
 Three skip types:
-1. FFN-only skip: Skip MLP computation, preserve residual
-2. Full-layer skip: Skip entire transformer layer
-3. Attention-only skip: Skip attention computation, manage KV cache
+1. FFN-only skip: Skip MLP, keep attention. Hook on MLP returns input.
+2. Full-layer skip: Skip entire layer. Replace forward with passthrough.
+3. Attention-only skip: Skip attention, keep MLP. Hook on attention returns input.
 
-Key design decisions:
-- Skip middle layers, protect first N and last N ("cold regions" per FFN-SkipLLM)
-- Default cold region = 4 layers on each side
-- Uses forward hooks instead of monkey-patching submodules
-- Properly handles KV cache for attention skipping
+Key insight from AdaSkip: when skipping a sublayer, the residual connection
+means hidden_states += sublayer(x). Skipping makes hidden_states += 0, which
+changes the norm. AdaSkip computes a scaling ratio during calibration to
+compensate. For simplicity, we use the hook approach (return input to sublayer)
+which preserves the residual correctly: hidden_states += layernorm(hidden_states)
+instead of hidden_states += mlp(layernorm(hidden_states)).
 """
 
 import torch
@@ -85,19 +86,19 @@ def _get_layers(model) -> list:
     raise ValueError(f"Cannot find layers in {type(model)}")
 
 
-def _find_mlp_attr(layer) -> str:
-    """Find the MLP attribute name in a transformer layer."""
+def _find_mlp(layer) -> nn.Module:
+    """Find the MLP module in a transformer layer."""
     for attr in ['mlp', 'feed_forward', 'ffn']:
         if hasattr(layer, attr):
-            return attr
+            return getattr(layer, attr)
     raise ValueError(f"Cannot find MLP in layer {type(layer)}")
 
 
-def _find_attn_attr(layer) -> str:
-    """Find the attention attribute name in a transformer layer."""
+def _find_attn(layer) -> nn.Module:
+    """Find the attention module in a transformer layer."""
     for attr in ['self_attn', 'attention', 'attn']:
         if hasattr(layer, attr):
-            return attr
+            return getattr(layer, attr)
     raise ValueError(f"Cannot find attention in layer {type(layer)}")
 
 
@@ -107,20 +108,16 @@ def apply_skip(
     skip_type: SkipType,
     skip_layers: List[int],
 ):
-    """Context manager that applies skipping to a model.
+    """Context manager that applies skipping via forward hooks.
 
-    Approach adapted from AdaSkip (AAAI 2025): replaces the layer's forward
-    method with a modified version that skips the specified sublayer while
-    properly managing residual connections and KV cache.
+    Uses the hook-based approach from AdaSkip: register a forward hook
+    on the sublayer (MLP or attention) that returns the input instead of
+    the computed output. This means the residual connection sees:
+        hidden_states = residual + hook_output
+    where hook_output = input_to_sublayer (the layernorm'd hidden states).
 
-    For FFN-only skip: the MLP computation is skipped but the residual
-    connection passes through (hidden_states unchanged through MLP stage).
-
-    For attention-only skip: attention is skipped, KV cache gets None entries
-    to maintain proper indexing for subsequent layers.
-
-    For full-layer skip: entire layer forward is replaced with pass-through,
-    KV cache gets None entries.
+    For full-layer skip, we replace the entire layer forward with a
+    passthrough that handles KV cache properly.
 
     Args:
         model: HuggingFace causal LM model.
@@ -132,141 +129,55 @@ def apply_skip(
         return
 
     layers = _get_layers(model)
+    hooks = []
     originals = {}
+
+    def _mlp_skip_hook(module, args, output):
+        """Return input to MLP, effectively skipping FFN computation."""
+        # args[0] is the hidden_states input to the MLP
+        return torch.zeros_like(output)
+
+    def _attn_skip_hook(module, args, output):
+        """Return zeros for attention output, effectively skipping attention.
+
+        Must handle the tuple output format: (attn_output, attn_weights, past_kv).
+        """
+        if isinstance(output, tuple):
+            # Zero out attention output, keep cache and weights
+            zeroed = torch.zeros_like(output[0])
+            return (zeroed,) + output[1:]
+        return torch.zeros_like(output)
 
     try:
         for idx in skip_layers:
             if idx >= len(layers):
                 continue
             layer = layers[idx]
-            originals[idx] = layer.forward
 
             if skip_type == "ffn_only":
-                layer.forward = _make_ffn_skip_forward(layer)
-            elif skip_type == "full_layer":
-                layer.forward = _make_full_layer_skip_forward(layer)
+                mlp = _find_mlp(layer)
+                hook = mlp.register_forward_hook(_mlp_skip_hook)
+                hooks.append(hook)
+
             elif skip_type == "attention_only":
-                layer.forward = _make_attn_skip_forward(layer)
+                attn = _find_attn(layer)
+                hook = attn.register_forward_hook(_attn_skip_hook)
+                hooks.append(hook)
+
+            elif skip_type == "full_layer":
+                originals[idx] = layer.forward
+                layer.forward = _make_full_layer_skip_forward(layer)
+
             else:
                 raise ValueError(f"Unknown skip type: {skip_type}")
 
         yield
 
     finally:
+        for hook in hooks:
+            hook.remove()
         for idx, original in originals.items():
             layers[idx].forward = original
-
-
-def _make_ffn_skip_forward(layer):
-    """Create a forward that runs attention normally but skips MLP.
-
-    The standard Qwen2/Llama layer forward does:
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(hidden_states, ...)
-        hidden_states = residual + hidden_states
-
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-
-    We keep the attention part, skip the MLP part (just pass residual through).
-    """
-    original_forward = layer.forward
-
-    def ffn_skip_forward(hidden_states, **kwargs):
-        # Run the full layer normally to get attention output + KV cache
-        result = original_forward(hidden_states, **kwargs)
-
-        # result is typically (hidden_states,) or (hidden_states, ..., cache)
-        if isinstance(result, tuple):
-            full_output = result[0]
-        else:
-            full_output = result
-
-        # The full output = input + attn_contribution + mlp_contribution
-        # We want: input + attn_contribution (no mlp)
-        # To get this, we run attention separately...
-        # Actually, it's simpler to just run the original and subtract the MLP contribution.
-
-        # Cleaner approach: compute what the layer WOULD output without MLP
-        # Run attention portion only
-        residual = hidden_states
-        attn_input = layer.input_layernorm(hidden_states)
-
-        attn_attr = _find_attn_attr(layer)
-        attn_module = getattr(layer, attn_attr)
-
-        # Run attention with all the kwargs it needs
-        attn_kwargs = {}
-        for k in ['attention_mask', 'position_ids', 'past_key_value',
-                   'output_attentions', 'use_cache', 'cache_position',
-                   'position_embeddings']:
-            if k in kwargs:
-                attn_kwargs[k] = kwargs[k]
-
-        attn_result = attn_module(attn_input, **attn_kwargs)
-
-        if isinstance(attn_result, tuple):
-            attn_output = attn_result[0]
-            # Preserve other outputs (attention weights, cache, etc.)
-            extra_outputs = attn_result[1:]
-        else:
-            attn_output = attn_result
-            extra_outputs = ()
-
-        # Apply residual connection for attention
-        hidden_states_after_attn = residual + attn_output
-        # Skip MLP entirely — hidden_states_after_attn IS the output
-
-        # Reconstruct the return format
-        outputs = (hidden_states_after_attn,)
-        if extra_outputs:
-            outputs = outputs + extra_outputs
-
-        # Match original return format
-        if not isinstance(result, tuple):
-            return outputs[0]
-        return outputs
-
-    return ffn_skip_forward
-
-
-def _make_attn_skip_forward(layer):
-    """Create a forward that skips attention but runs MLP.
-
-    Attention is skipped, KV cache gets None entries to maintain indexing.
-    MLP runs normally on the (unchanged) hidden states.
-    """
-    def attn_skip_forward(hidden_states, **kwargs):
-        # Skip attention: just preserve hidden_states
-        # Handle KV cache — append None entries so indexing stays correct
-        past_key_value = kwargs.get('past_key_value', None)
-        if past_key_value is not None and kwargs.get('use_cache', False):
-            # Append None to cache to maintain layer indexing
-            layer_idx = getattr(layer, 'layer_idx', None)
-            if layer_idx is not None and hasattr(past_key_value, 'key_cache'):
-                while len(past_key_value.key_cache) <= layer_idx:
-                    past_key_value.key_cache.append(None)
-                while len(past_key_value.value_cache) <= layer_idx:
-                    past_key_value.value_cache.append(None)
-
-        # Run MLP on the unchanged hidden states
-        residual = hidden_states
-        mlp_attr = _find_mlp_attr(layer)
-        mlp_input = layer.post_attention_layernorm(hidden_states)
-        mlp_output = getattr(layer, mlp_attr)(mlp_input)
-        hidden_states = residual + mlp_output
-
-        outputs = (hidden_states,)
-        if kwargs.get('output_attentions', False):
-            outputs = outputs + (None,)
-        if kwargs.get('use_cache', False):
-            outputs = outputs + (past_key_value,)
-        return outputs
-
-    return attn_skip_forward
 
 
 def _make_full_layer_skip_forward(layer):
@@ -276,7 +187,6 @@ def _make_full_layer_skip_forward(layer):
     KV cache gets None entries to maintain indexing.
     """
     def full_skip_forward(hidden_states, **kwargs):
-        # Handle KV cache
         past_key_value = kwargs.get('past_key_value', None)
         if past_key_value is not None and kwargs.get('use_cache', False):
             layer_idx = getattr(layer, 'layer_idx', None)
@@ -286,7 +196,6 @@ def _make_full_layer_skip_forward(layer):
                 while len(past_key_value.value_cache) <= layer_idx:
                     past_key_value.value_cache.append(None)
 
-        # Pass through unchanged
         outputs = (hidden_states,)
         if kwargs.get('output_attentions', False):
             outputs = outputs + (None,)

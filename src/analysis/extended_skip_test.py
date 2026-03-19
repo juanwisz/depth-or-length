@@ -65,6 +65,7 @@ def main():
         print(f"{'='*60}")
 
         for skip_layers, label in SKIP_CONFIGS:
+            t1 = time.time()
             hooks = []
             for idx in skip_layers:
                 def make_hook():
@@ -84,6 +85,11 @@ def main():
             total = min(len(full_tokens), len(skip_tokens))
             pct = match / total * 100 if total > 0 else 0
 
+            skip_text = tokenizer.decode(skip_tokens, skip_special_tokens=True)
+            # Per-position match vector
+            per_pos_match = [int(a == b) for a, b in zip(full_tokens, skip_tokens)]
+            first_div = next((i for i, m in enumerate(per_pos_match) if m == 0), total)
+
             result = {
                 "problem_idx": prob_idx,
                 "problem": problem,
@@ -92,8 +98,19 @@ def main():
                 "match": match,
                 "total": total,
                 "pct": pct,
-                "full_tokens": len(full_tokens),
-                "skip_tokens": len(skip_tokens),
+                "first_divergence": first_div,
+                "per_position_match": per_pos_match,
+                "full_token_ids": full_tokens,
+                "skip_token_ids": skip_tokens,
+                "num_full_tokens": len(full_tokens),
+                "num_skip_tokens": len(skip_tokens),
+                "full_text": full_text,
+                "skip_text": skip_text,
+                "full_time_s": t_full,
+                "skip_time_s": time.time() - t1,
+                "input_tokens": input_ids.shape[1],
+                "model": model_name,
+                "max_new_tokens": max_tokens,
             }
             all_results.append(result)
             print(f"  {label:30s}: {match}/{total} ({pct:.0f}%)")

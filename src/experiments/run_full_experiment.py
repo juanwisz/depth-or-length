@@ -24,8 +24,7 @@ import logging
 import os
 import sys
 import time
-from dataclasses import dataclass
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 
 import torch
 import torch.nn as nn
@@ -34,6 +33,9 @@ _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '.
 sys.path.insert(0, _project_root)
 sys.path.insert(0, os.path.join(_project_root, 'src'))
 
+from experiments.configs import (
+    CONFIGS, ExperimentConfig, append_result, load_completed_pairs,
+)
 from infrastructure.model_loader import load_model_and_tokenizer, resolve_model_name
 from infrastructure.generation import extract_answer, check_answer_correct
 from benchmarks.loader import load_benchmark
@@ -47,52 +49,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class ExperimentConfig:
-    """One experimental condition to run."""
-
-    name: str
-    skip_type: Optional[str]  # None for baseline
-    skip_pct: float  # 0 for baseline
-    flop_reduction_pct: float  # estimated FLOP savings
-
-    @property
-    def is_baseline(self) -> bool:
-        return self.skip_type is None
-
-
-# FFN ≈ 2/3 of layer compute, attention ≈ 1/3.
-# For 28 layers (DeepSeek-R1-Distill-Qwen-7B):
-# - skip_pct=25 means skip 5 of 20 eligible layers (cold_start=4, cold_end=4)
-# - FFN-only skip 5 layers: saves 5/28 * 2/3 ≈ 11.9% FLOPs
-# - Full-layer skip 5 layers: saves 5/28 ≈ 17.9% FLOPs
-# - To match 11.9% FLOPs with full-layer: skip ~3.3 layers → skip_pct≈16.7
-#
-# Iso-FLOP matching table (for 28-layer model, 20 eligible):
-# FFN-only skip_pct → full-layer skip_pct at same FLOPs
-# FFN 25% (5 layers, 11.9% FLOP) ↔ Full 16.7% (3.3 layers, 11.9%)
-# FFN 50% (10 layers, 23.8% FLOP) ↔ Full 33.3% (6.7 layers, 23.8%)
-# FFN 75% (15 layers, 35.7% FLOP) ↔ Full 50% (10 layers, 35.7%)
-#
-# Attention-only at same FLOPs: attn is 1/3 of layer
-# FFN 25% (11.9% FLOP) ↔ Attn 50% (10 layers, 11.9%)
-# FFN 50% (23.8% FLOP) ↔ Attn 100% (20 layers, 23.8%)
-
-CONFIGS = [
-    # Baseline with activation caching
-    ExperimentConfig("baseline", None, 0, 0),
-    # FFN-only skip at 3 levels
-    ExperimentConfig("ffn_skip_25", "ffn_only", 25, 11.9),
-    ExperimentConfig("ffn_skip_50", "ffn_only", 50, 23.8),
-    ExperimentConfig("ffn_skip_75", "ffn_only", 75, 35.7),
-    # Full-layer skip at ISO-FLOP matched levels
-    ExperimentConfig("full_skip_isoflop_12", "full_layer", 16.7, 11.9),
-    ExperimentConfig("full_skip_isoflop_24", "full_layer", 33.3, 23.8),
-    ExperimentConfig("full_skip_isoflop_36", "full_layer", 50, 35.7),
-    # Attention-only skip at ISO-FLOP matched levels
-    ExperimentConfig("attn_skip_isoflop_12", "attention_only", 50, 11.9),
-    ExperimentConfig("attn_skip_isoflop_24", "attention_only", 100, 23.8),
-]
 
 
 class ActivationCache:
@@ -335,39 +291,6 @@ def run_batch(
     return results
 
 
-def load_completed_pairs(output_dir: str, model_short: str, benchmark: str) -> set:
-    """Load all completed (problem_id, config_name) pairs across all JSONL files.
-
-    Returns:
-        Set of (problem_id, config_name) tuples already completed.
-    """
-    completed = set()
-    if not os.path.exists(output_dir):
-        return completed
-    for fname in os.listdir(output_dir):
-        if not fname.endswith('.jsonl'):
-            continue
-        path = os.path.join(output_dir, fname)
-        with open(path) as f:
-            for line in f:
-                try:
-                    rec = json.loads(line)
-                    completed.add((rec["problem_id"], rec["config"]))
-                except (json.JSONDecodeError, KeyError):
-                    continue
-    return completed
-
-
-def append_result(
-    output_dir: str, model_short: str, benchmark: str,
-    config: ExperimentConfig, record: Dict,
-) -> None:
-    """Append one result record to the appropriate JSONL file."""
-    out_path = os.path.join(
-        output_dir, f"{model_short}__{benchmark}__{config.name}.jsonl"
-    )
-    with open(out_path, "a") as f:
-        f.write(json.dumps(record) + "\n")
 
 
 def parse_args():
@@ -446,7 +369,7 @@ def main():
     # Load completed (problem_id, config) pairs for resume
     completed = set()
     if args.resume:
-        completed = load_completed_pairs(args.output_dir, model_short, args.benchmark)
+        completed = load_completed_pairs(args.output_dir)
         logger.info(f"Resuming: {len(completed)} (problem, config) pairs already done")
 
     batch_size = args.batch_size

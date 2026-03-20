@@ -404,10 +404,9 @@ def main():
         raise ValueError("Cannot determine layer count")
     logger.info(f"Layers: {num_layers}")
 
-    # Install activation cache (used only for baseline)
+    # Activation cache created lazily — hooks installed only for baseline
     act_cache = ActivationCache(model)
-    act_cache.install_hooks()
-    logger.info(f"Activation cache hooks installed on {num_layers} layers")
+    logger.info(f"Activation cache ready ({num_layers} layers)")
 
     # Load benchmark
     problems = load_benchmark(
@@ -446,14 +445,19 @@ def main():
 
             logger.info(f"  [{config.name}] running...")
             try:
+                use_cache = config.is_baseline
+                if use_cache:
+                    act_cache.install_hooks()
                 result = run_single_problem(
                     model, tokenizer, problem["prompt"], config,
                     num_layers,
-                    cache=act_cache if config.is_baseline else None,
+                    cache=act_cache if use_cache else None,
                     seed=args.seed, temperature=args.temperature,
                     top_p=args.top_p,
                     max_new_tokens=args.max_new_tokens,
                 )
+                if use_cache:
+                    act_cache.remove_hooks()
             except Exception as e:
                 logger.error(f"    CRASH on {config.name}/{pid}: {e}")
                 continue

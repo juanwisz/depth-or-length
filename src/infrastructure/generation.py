@@ -271,8 +271,15 @@ def check_answer_correct(
         return extracted.strip().upper() == ground_truth.strip().upper()
 
     elif benchmark_type in ("math", "aime"):
-        # Numeric/symbolic: normalize and compare
-        return normalize_math_answer(extracted) == normalize_math_answer(ground_truth)
+        # Use hendrycks_math is_equiv for reproducibility with published baselines
+        # Clean $ signs and whitespace before comparison
+        clean_ext = str(extracted).strip().strip('$').strip()
+        clean_gt = str(ground_truth).strip().strip('$').strip()
+        try:
+            from lm_eval.tasks.hendrycks_math.utils import is_equiv
+            return is_equiv(clean_ext, clean_gt)
+        except ImportError:
+            return normalize_math_answer(extracted) == normalize_math_answer(ground_truth)
 
     elif benchmark_type in ("humaneval", "livecodebench"):
         # Code: would need execution. For now, return None.

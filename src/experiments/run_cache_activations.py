@@ -95,11 +95,14 @@ class ActivationCache:
         raise ValueError(f"Cannot find attention in {type(layer)}")
 
     def reset(self) -> None:
-        """Clear cached data for next problem."""
-        for d in [self.ffn_output_norms, self.attn_output_norms,
-                  self.residual_pre_attn_norms, self.residual_post_attn_norms,
-                  self.residual_post_ffn_norms, self.attn_entropy]:
-            d.clear()
+        """Clear cached data for next problem, keeping layer keys."""
+        for idx in range(self.num_layers):
+            self.ffn_output_norms[idx] = []
+            self.attn_output_norms[idx] = []
+            self.residual_pre_attn_norms[idx] = []
+            self.residual_post_attn_norms[idx] = []
+            self.residual_post_ffn_norms[idx] = []
+            self.attn_entropy[idx] = []
 
     def install_hooks(self) -> None:
         """Register forward hooks on all layers."""

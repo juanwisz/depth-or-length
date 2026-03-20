@@ -9,9 +9,11 @@ Caches per generated token, per layer:
 - FFN output L2 norm (scalar)
 - Attention output L2 norm (scalar)
 - Residual stream norm before/after each sublayer
-- Attention entropy per head (scalar per head)
 
-This is compact (~28 layers × N_tokens × ~35 floats ≈ ~100KB per problem)
+Uses SDPA (fast) instead of eager attention. Attention entropy is dropped
+to avoid the ~4x slowdown of eager attention.
+
+This is compact (~28 layers × N_tokens × ~4 floats ≈ ~10KB per problem)
 and sufficient for:
 - Identifying "dead" FFN layers (low contribution)
 - Comparing FFN vs attention importance across layers
@@ -68,11 +70,7 @@ class ActivationCache:
         self.ffn_output_norms: Dict[int, List[float]] = {}
         self.attn_output_norms: Dict[int, List[float]] = {}
         self.residual_pre_attn_norms: Dict[int, List[float]] = {}
-        self.residual_post_attn_norms: Dict[int, List[float]] = {}
         self.residual_post_ffn_norms: Dict[int, List[float]] = {}
-        # Attention entropy per head: Dict[layer_idx, List[List[float]]]
-        # outer list = tokens, inner list = heads
-        self.attn_entropy: Dict[int, List[List[float]]] = {}
 
     def _get_layers(self) -> list:
         """Get transformer layers."""
@@ -100,9 +98,7 @@ class ActivationCache:
             self.ffn_output_norms[idx] = []
             self.attn_output_norms[idx] = []
             self.residual_pre_attn_norms[idx] = []
-            self.residual_post_attn_norms[idx] = []
             self.residual_post_ffn_norms[idx] = []
-            self.attn_entropy[idx] = []
 
     def install_hooks(self) -> None:
         """Register forward hooks on all layers."""
@@ -111,9 +107,7 @@ class ActivationCache:
             self.ffn_output_norms[idx] = []
             self.attn_output_norms[idx] = []
             self.residual_pre_attn_norms[idx] = []
-            self.residual_post_attn_norms[idx] = []
             self.residual_post_ffn_norms[idx] = []
-            self.attn_entropy[idx] = []
 
             # Hook on MLP
             mlp = self._find_mlp(layer)
@@ -158,32 +152,15 @@ class ActivationCache:
         return hook
 
     def _make_attn_hook(self, layer_idx: int):
-        """Hook that records attention output norm and entropy."""
+        """Hook that records attention output norm."""
         def hook(module, args, output):
             with torch.no_grad():
                 if isinstance(output, tuple):
                     attn_out = output[0]
-                    # attention weights: (batch, num_heads, seq_len, seq_len)
-                    attn_weights = output[1] if len(output) > 1 else None
                 else:
                     attn_out = output
-                    attn_weights = None
-
-                # Attention output norm
                 norm = attn_out[0, -1, :].float().norm().item()
                 self.attn_output_norms[layer_idx].append(norm)
-
-                # Attention entropy per head
-                if attn_weights is not None and attn_weights.numel() > 0:
-                    # attn_weights: (1, num_heads, q_len, kv_len)
-                    # Take last query token
-                    w = attn_weights[0, :, -1, :].float()  # (num_heads, kv_len)
-                    # Entropy: -sum(p * log(p)), clamp for numerical stability
-                    w_clamped = w.clamp(min=1e-10)
-                    entropy = -(w_clamped * w_clamped.log()).sum(dim=-1)  # (num_heads,)
-                    self.attn_entropy[layer_idx].append(entropy.tolist())
-                else:
-                    self.attn_entropy[layer_idx].append([])
             return output
         return hook
 
@@ -223,7 +200,6 @@ class ActivationCache:
             "attn_output_norms": {str(k): v for k, v in self.attn_output_norms.items()},
             "residual_pre_attn_norms": {str(k): v for k, v in self.residual_pre_attn_norms.items()},
             "residual_post_ffn_norms": {str(k): v for k, v in self.residual_post_ffn_norms.items()},
-            "attn_entropy": {str(k): v for k, v in self.attn_entropy.items()},
         }
 
 
@@ -283,17 +259,12 @@ def generate_with_cache(
     start_time = time.time()
 
     with torch.no_grad():
-        # output_attentions=True on the MODEL config so each attention layer
-        # returns weights in its forward() — hooks capture them.
-        # We don't need generate() to accumulate them.
-        model.config.output_attentions = True
         outputs = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
             **gen_kwargs,
             pad_token_id=tokenizer.pad_token_id,
         )
-        model.config.output_attentions = False
 
     gen_ids = outputs[0][input_len:]
     actual_tokens = len(gen_ids)
@@ -322,7 +293,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--top_p", type=float, default=0.95)
-    parser.add_argument("--max_new_tokens", type=int, default=32768)
+    parser.add_argument("--max_new_tokens", type=int, default=8192)
     parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
 
@@ -355,12 +326,9 @@ def main():
                 completed.add(rec["problem_id"])
         logger.info(f"Resuming: {len(completed)} problems already cached")
 
-    # Load model with eager attention (needed to get attention weights for entropy)
-    # SDPA fuses attention and doesn't expose weights. Eager is ~20% slower
-    # but gives us attention probabilities for entropy computation.
-    logger.info("Loading model (eager attention for weight capture)...")
+    logger.info("Loading model (SDPA for speed)...")
     model, tokenizer = load_model_and_tokenizer(
-        hf_name, attn_implementation="eager"
+        hf_name, attn_implementation="sdpa"
     )
     logger.info("Model loaded")
 

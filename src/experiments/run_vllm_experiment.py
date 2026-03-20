@@ -220,6 +220,7 @@ def run_config(
         gpu_memory_utilization=gpu_mem,
         max_model_len=max_new_tokens + 2048,  # input + output headroom
         trust_remote_code=True,
+        enforce_eager=not config.is_baseline,  # CUDA graphs only for baseline
     )
     load_time = time.time() - load_start
     logger.info(f"  Model loaded in {load_time:.1f}s")

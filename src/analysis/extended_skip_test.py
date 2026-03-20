@@ -54,7 +54,7 @@ def main():
         # Full model generation
         t0 = time.time()
         with torch.no_grad():
-            out = model.generate(input_ids, max_new_tokens=max_tokens, do_sample=False)
+            out = model.generate(input_ids, max_new_tokens=max_tokens, do_sample=True, temperature=0.6, top_p=0.95, seed=42)
         full_tokens = out[0][input_ids.shape[1]:].tolist()
         full_text = tokenizer.decode(full_tokens, skip_special_tokens=True)
         t_full = time.time() - t0
@@ -75,7 +75,7 @@ def main():
                 hooks.append(model.model.layers[idx].register_forward_hook(make_hook()))
 
             with torch.no_grad():
-                out = model.generate(input_ids, max_new_tokens=max_tokens, do_sample=False)
+                out = model.generate(input_ids, max_new_tokens=max_tokens, do_sample=True, temperature=0.6, top_p=0.95, seed=42)
 
             for h in hooks:
                 h.remove()

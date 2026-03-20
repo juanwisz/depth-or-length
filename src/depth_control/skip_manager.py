@@ -129,24 +129,25 @@ def apply_skip(
         return
 
     layers = _get_layers(model)
-    hooks = []
     originals = {}
 
-    def _mlp_skip_hook(module, args, output):
-        """Return input to MLP, effectively skipping FFN computation."""
-        # args[0] is the hidden_states input to the MLP
-        return torch.zeros_like(output)
+    def _make_mlp_skip(original_mlp_forward):
+        """Replace MLP forward to return zeros without computing."""
+        def skipped_forward(hidden_states):
+            return torch.zeros_like(hidden_states)
+        return skipped_forward
 
-    def _attn_skip_hook(module, args, output):
-        """Return zeros for attention output, effectively skipping attention.
+    def _make_attn_skip(original_attn_forward):
+        """Replace attention forward to return zeros without computing.
 
-        Must handle the tuple output format: (attn_output, attn_weights, past_kv).
+        Must still handle KV cache args to avoid downstream errors.
+        Qwen2Attention.forward returns (attn_output, attn_weights).
+        The caller (Qwen2DecoderLayer) unpacks with: hidden_states, _ = self.self_attn(...)
         """
-        if isinstance(output, tuple):
-            # Zero out attention output, keep cache and weights
-            zeroed = torch.zeros_like(output[0])
-            return (zeroed,) + output[1:]
-        return torch.zeros_like(output)
+        def skipped_forward(hidden_states, **kwargs):
+            zeros = torch.zeros_like(hidden_states)
+            return zeros, None
+        return skipped_forward
 
     try:
         for idx in skip_layers:
@@ -156,16 +157,16 @@ def apply_skip(
 
             if skip_type == "ffn_only":
                 mlp = _find_mlp(layer)
-                hook = mlp.register_forward_hook(_mlp_skip_hook)
-                hooks.append(hook)
+                originals[('mlp', idx)] = mlp.forward
+                mlp.forward = _make_mlp_skip(mlp.forward)
 
             elif skip_type == "attention_only":
                 attn = _find_attn(layer)
-                hook = attn.register_forward_hook(_attn_skip_hook)
-                hooks.append(hook)
+                originals[('attn', idx)] = attn.forward
+                attn.forward = _make_attn_skip(attn.forward)
 
             elif skip_type == "full_layer":
-                originals[idx] = layer.forward
+                originals[('layer', idx)] = layer.forward
                 layer.forward = _make_full_layer_skip_forward(layer)
 
             else:
@@ -174,10 +175,15 @@ def apply_skip(
         yield
 
     finally:
-        for hook in hooks:
-            hook.remove()
-        for idx, original in originals.items():
-            layers[idx].forward = original
+        for key, original in originals.items():
+            kind, idx = key
+            layer = layers[idx]
+            if kind == 'mlp':
+                _find_mlp(layer).forward = original
+            elif kind == 'attn':
+                _find_attn(layer).forward = original
+            elif kind == 'layer':
+                layer.forward = original
 
 
 def _make_full_layer_skip_forward(layer):

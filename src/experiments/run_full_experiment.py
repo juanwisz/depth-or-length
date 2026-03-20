@@ -166,6 +166,8 @@ class ActivationCache:
         def hook(module, args, output):
             with torch.no_grad():
                 out = output[0] if isinstance(output, tuple) else output
+                while isinstance(out, tuple):
+                    out = out[0]
                 norm = out[0, -1, :].float().norm().item()
                 storage[layer_idx].append(norm)
             return output
@@ -176,6 +178,8 @@ class ActivationCache:
         def hook(module, args):
             with torch.no_grad():
                 hidden = args[0] if isinstance(args, tuple) else args
+                while isinstance(hidden, tuple):
+                    hidden = hidden[0]
                 norm = hidden[0, -1, :].float().norm().item()
                 self.residual_pre_norms[layer_idx].append(norm)
         return hook
@@ -185,6 +189,8 @@ class ActivationCache:
         def hook(module, args, output):
             with torch.no_grad():
                 hidden = output[0] if isinstance(output, tuple) else output
+                while isinstance(hidden, tuple):
+                    hidden = hidden[0]
                 norm = hidden[0, -1, :].float().norm().item()
                 self.residual_post_norms[layer_idx].append(norm)
             return output

@@ -307,137 +307,39 @@ def run_single_problem(
     return result
 
 
-def load_completed_ids(path: str) -> set:
-    """Load completed problem IDs from JSONL file."""
+def load_completed_pairs(output_dir: str, model_short: str, benchmark: str) -> set:
+    """Load all completed (problem_id, config_name) pairs across all JSONL files.
+
+    Returns:
+        Set of (problem_id, config_name) tuples already completed.
+    """
     completed = set()
-    if os.path.exists(path):
+    if not os.path.exists(output_dir):
+        return completed
+    for fname in os.listdir(output_dir):
+        if not fname.endswith('.jsonl'):
+            continue
+        path = os.path.join(output_dir, fname)
         with open(path) as f:
             for line in f:
                 try:
                     rec = json.loads(line)
-                    completed.add(rec["problem_id"])
+                    completed.add((rec["problem_id"], rec["config"]))
                 except (json.JSONDecodeError, KeyError):
                     continue
     return completed
 
 
-def run_config(
-    model, tokenizer, problems: list,
-    config: ExperimentConfig,
-    num_layers: int,
-    output_dir: str,
-    model_name: str,
-    benchmark: str,
-    cache: Optional[ActivationCache] = None,
-    seed: int = 42,
-    temperature: float = 0.6,
-    top_p: float = 0.95,
-    max_new_tokens: int = 8192,
-    resume: bool = True,
+def append_result(
+    output_dir: str, model_short: str, benchmark: str,
+    config: ExperimentConfig, record: Dict,
 ) -> None:
-    """Run one config across all problems.
-
-    Args:
-        model: HuggingFace model.
-        tokenizer: Tokenizer.
-        problems: List of problem dicts.
-        config: Experiment config to run.
-        num_layers: Total transformer layers.
-        output_dir: Base output directory.
-        model_name: HuggingFace model name.
-        benchmark: Benchmark name.
-        cache: ActivationCache (only for baseline).
-        seed: Random seed.
-        temperature: Sampling temperature.
-        top_p: Nucleus sampling.
-        max_new_tokens: Max generation tokens.
-        resume: Whether to skip completed problems.
-    """
-    model_short = model_name.split("/")[-1].lower().replace("-", "_")
+    """Append one result record to the appropriate JSONL file."""
     out_path = os.path.join(
         output_dir, f"{model_short}__{benchmark}__{config.name}.jsonl"
     )
-
-    completed = load_completed_ids(out_path) if resume else set()
-    remaining = [p for p in problems if p["problem_id"] not in completed]
-
-    if not remaining:
-        logger.info(f"[{config.name}] All {len(problems)} problems done, skipping")
-        return
-
-    logger.info(
-        f"[{config.name}] Running {len(remaining)}/{len(problems)} problems "
-        f"(skip_type={config.skip_type}, skip_pct={config.skip_pct}, "
-        f"flop_reduction≈{config.flop_reduction_pct}%)"
-    )
-
-    bench_type_map = {
-        "math500": "math", "gpqa": "gpqa",
-        "mmlu_pro": "mmlu_pro", "aime": "aime",
-    }
-    bench_type = bench_type_map.get(benchmark, "math")
-
-    correct = 0
-    total = 0
-
-    for i, problem in enumerate(remaining):
-        pid = problem["problem_id"]
-        logger.info(f"  [{i+1}/{len(remaining)}] {pid}")
-
-        result = run_single_problem(
-            model, tokenizer, problem["prompt"], config, num_layers,
-            cache=cache if config.is_baseline else None,
-            seed=seed, temperature=temperature, top_p=top_p,
-            max_new_tokens=max_new_tokens,
-        )
-
-        extracted = extract_answer(result["generation_text"], bench_type)
-        is_correct = check_answer_correct(
-            extracted, problem["ground_truth"], bench_type
-        )
-        accuracy = 1 if is_correct else 0
-        total += 1
-        correct += accuracy
-
-        record = {
-            "problem_id": pid,
-            "config": config.name,
-            "model": model_name,
-            "benchmark": benchmark,
-            "skip_type": config.skip_type,
-            "skip_pct": config.skip_pct,
-            "flop_reduction_pct": config.flop_reduction_pct,
-            "accuracy": accuracy,
-            "extracted_answer": extracted,
-            "ground_truth": problem["ground_truth"],
-            "actual_tokens_generated": result["actual_tokens_generated"],
-            "wall_clock_seconds": result["wall_clock_seconds"],
-            "generation_text": result["generation_text"],
-            "seed": seed,
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        }
-
-        if "activations" in result:
-            record["activations"] = result["activations"]
-        if "skip_layers" in result:
-            record["skip_layers"] = result["skip_layers"]
-
-        with open(out_path, "a") as f:
-            f.write(json.dumps(record) + "\n")
-
-        running_acc = correct / total * 100
-        logger.info(
-            f"    {'✓' if accuracy else '✗'} | "
-            f"Ans: {extracted} | GT: {problem['ground_truth']} | "
-            f"Tok: {result['actual_tokens_generated']} | "
-            f"Time: {result['wall_clock_seconds']:.1f}s | "
-            f"Acc: {running_acc:.1f}%"
-        )
-
-    logger.info(
-        f"[{config.name}] DONE: {correct}/{total} = "
-        f"{correct/total*100:.1f}%"
-    )
+    with open(out_path, "a") as f:
+        f.write(json.dumps(record) + "\n")
 
 
 def parse_args():
@@ -463,15 +365,26 @@ def parse_args():
 
 
 def main():
-    """Run all configs sequentially with one model load."""
+    """Run all configs interleaved: for each problem, run all configs.
+
+    This ensures that even if the VM dies after N problems, we have
+    N data points for EVERY config — enough to see signal early.
+    """
     args = parse_args()
     hf_name = resolve_model_name(args.model)
+    model_short = hf_name.split("/")[-1].lower().replace("-", "_")
 
     logger.info(f"Model: {hf_name}")
     logger.info(f"Benchmark: {args.benchmark} (n={args.subsample})")
     logger.info(f"Output: {args.output_dir}")
 
     os.makedirs(args.output_dir, exist_ok=True)
+
+    bench_type_map = {
+        "math500": "math", "gpqa": "gpqa",
+        "mmlu_pro": "mmlu_pro", "aime": "aime",
+    }
+    bench_type = bench_type_map.get(args.benchmark, "math")
 
     # Load model ONCE
     logger.info("Loading model...")
@@ -497,32 +410,98 @@ def main():
     logger.info(f"Loaded {len(problems)} problems")
 
     # Filter configs if specified
-    configs_to_run = CONFIGS
+    configs_to_run = list(CONFIGS)
     if args.configs:
         configs_to_run = [c for c in CONFIGS if c.name in args.configs]
-        logger.info(f"Running {len(configs_to_run)} configs: {[c.name for c in configs_to_run]}")
+    logger.info(f"Configs ({len(configs_to_run)}): {[c.name for c in configs_to_run]}")
 
-    # Run each config
+    # Load completed (problem_id, config) pairs for resume
+    completed = set()
+    if args.resume:
+        completed = load_completed_pairs(args.output_dir, model_short, args.benchmark)
+        logger.info(f"Resuming: {len(completed)} (problem, config) pairs already done")
+
+    # Track per-config accuracy
+    config_correct: Dict[str, int] = {c.name: 0 for c in configs_to_run}
+    config_total: Dict[str, int] = {c.name: 0 for c in configs_to_run}
+
+    # INTERLEAVED: outer loop = problems, inner loop = configs
     total_start = time.time()
-    for config in configs_to_run:
-        config_start = time.time()
-        run_config(
-            model, tokenizer, problems, config, num_layers,
-            args.output_dir, hf_name, args.benchmark,
-            cache=act_cache,
-            seed=args.seed,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            max_new_tokens=args.max_new_tokens,
-            resume=args.resume,
-        )
-        elapsed = time.time() - config_start
-        logger.info(f"[{config.name}] took {elapsed/60:.1f} min")
+    for p_idx, problem in enumerate(problems):
+        pid = problem["problem_id"]
+        logger.info(f"\n{'='*60}")
+        logger.info(f"PROBLEM [{p_idx+1}/{len(problems)}]: {pid}")
+        logger.info(f"{'='*60}")
+
+        for config in configs_to_run:
+            if (pid, config.name) in completed:
+                logger.info(f"  [{config.name}] already done, skipping")
+                continue
+
+            logger.info(f"  [{config.name}] running...")
+            result = run_single_problem(
+                model, tokenizer, problem["prompt"], config, num_layers,
+                cache=act_cache if config.is_baseline else None,
+                seed=args.seed, temperature=args.temperature,
+                top_p=args.top_p, max_new_tokens=args.max_new_tokens,
+            )
+
+            extracted = extract_answer(result["generation_text"], bench_type)
+            is_correct = check_answer_correct(
+                extracted, problem["ground_truth"], bench_type
+            )
+            accuracy = 1 if is_correct else 0
+            config_total[config.name] += 1
+            config_correct[config.name] += accuracy
+
+            record = {
+                "problem_id": pid,
+                "config": config.name,
+                "model": hf_name,
+                "benchmark": args.benchmark,
+                "skip_type": config.skip_type,
+                "skip_pct": config.skip_pct,
+                "flop_reduction_pct": config.flop_reduction_pct,
+                "accuracy": accuracy,
+                "extracted_answer": extracted,
+                "ground_truth": problem["ground_truth"],
+                "actual_tokens_generated": result["actual_tokens_generated"],
+                "wall_clock_seconds": result["wall_clock_seconds"],
+                "generation_text": result["generation_text"],
+                "seed": args.seed,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            if "activations" in result:
+                record["activations"] = result["activations"]
+            if "skip_layers" in result:
+                record["skip_layers"] = result["skip_layers"]
+
+            append_result(
+                args.output_dir, model_short, args.benchmark, config, record
+            )
+
+            running_acc = config_correct[config.name] / config_total[config.name] * 100
+            logger.info(
+                f"    {'✓' if accuracy else '✗'} | "
+                f"Ans: {extracted} | GT: {problem['ground_truth']} | "
+                f"Tok: {result['actual_tokens_generated']} | "
+                f"Time: {result['wall_clock_seconds']:.1f}s | "
+                f"RunAcc: {running_acc:.1f}%"
+            )
+
+        # Summary after each problem
+        elapsed = time.time() - total_start
+        logger.info(f"\n  --- After {p_idx+1} problems ({elapsed/60:.1f} min) ---")
+        for config in configs_to_run:
+            t = config_total[config.name]
+            if t > 0:
+                acc = config_correct[config.name] / t * 100
+                logger.info(f"    {config.name}: {acc:.1f}% ({t} done)")
 
     # Cleanup
     act_cache.remove_hooks()
     total_elapsed = time.time() - total_start
-    logger.info(f"\nALL CONFIGS DONE in {total_elapsed/60:.1f} min")
+    logger.info(f"\nALL DONE in {total_elapsed/60:.1f} min")
 
 
 if __name__ == "__main__":

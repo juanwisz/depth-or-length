@@ -445,14 +445,22 @@ def main():
                 continue
 
             logger.info(f"  [{config.name}] running...")
-            result = run_single_problem(
-                model, tokenizer, problem["prompt"], config, num_layers,
-                cache=act_cache if config.is_baseline else None,
-                seed=args.seed, temperature=args.temperature,
-                top_p=args.top_p, max_new_tokens=args.max_new_tokens,
-            )
+            try:
+                result = run_single_problem(
+                    model, tokenizer, problem["prompt"], config,
+                    num_layers,
+                    cache=act_cache if config.is_baseline else None,
+                    seed=args.seed, temperature=args.temperature,
+                    top_p=args.top_p,
+                    max_new_tokens=args.max_new_tokens,
+                )
+            except Exception as e:
+                logger.error(f"    CRASH on {config.name}/{pid}: {e}")
+                continue
 
-            extracted = extract_answer(result["generation_text"], bench_type)
+            extracted = extract_answer(
+                result["generation_text"], bench_type
+            )
             is_correct = check_answer_correct(
                 extracted, problem["ground_truth"], bench_type
             )
@@ -471,11 +479,14 @@ def main():
                 "accuracy": accuracy,
                 "extracted_answer": extracted,
                 "ground_truth": problem["ground_truth"],
-                "actual_tokens_generated": result["actual_tokens_generated"],
+                "actual_tokens_generated":
+                    result["actual_tokens_generated"],
                 "wall_clock_seconds": result["wall_clock_seconds"],
                 "generation_text": result["generation_text"],
                 "seed": args.seed,
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "timestamp": time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                ),
             }
             if "activations" in result:
                 record["activations"] = result["activations"]
@@ -483,13 +494,18 @@ def main():
                 record["skip_layers"] = result["skip_layers"]
 
             append_result(
-                args.output_dir, model_short, args.benchmark, config, record
+                args.output_dir, model_short, args.benchmark,
+                config, record,
             )
 
-            running_acc = config_correct[config.name] / config_total[config.name] * 100
+            running_acc = (
+                config_correct[config.name]
+                / config_total[config.name] * 100
+            )
             logger.info(
                 f"    {'✓' if accuracy else '✗'} | "
-                f"Ans: {extracted} | GT: {problem['ground_truth']} | "
+                f"Ans: {extracted} | "
+                f"GT: {problem['ground_truth']} | "
                 f"Tok: {result['actual_tokens_generated']} | "
                 f"Time: {result['wall_clock_seconds']:.1f}s | "
                 f"RunAcc: {running_acc:.1f}%"

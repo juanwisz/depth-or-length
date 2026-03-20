@@ -187,20 +187,13 @@ def _make_full_layer_skip_forward(layer):
     KV cache gets None entries to maintain indexing.
     """
     def full_skip_forward(hidden_states, **kwargs):
-        past_key_value = kwargs.get('past_key_value', None)
-        if past_key_value is not None and kwargs.get('use_cache', False):
-            layer_idx = getattr(layer, 'layer_idx', None)
-            if layer_idx is not None and hasattr(past_key_value, 'key_cache'):
-                while len(past_key_value.key_cache) <= layer_idx:
-                    past_key_value.key_cache.append(None)
-                while len(past_key_value.value_cache) <= layer_idx:
-                    past_key_value.value_cache.append(None)
+        """Skip entire layer — just pass hidden_states through.
 
-        outputs = (hidden_states,)
-        if kwargs.get('output_attentions', False):
-            outputs = outputs + (None,)
-        if kwargs.get('use_cache', False):
-            outputs = outputs + (past_key_value,)
-        return outputs
+        Qwen2DecoderLayer.forward() returns a plain tensor (not a tuple),
+        so we must do the same. KV cache is handled internally by the
+        model's attention implementation; skipped layers simply don't
+        contribute any new KV entries.
+        """
+        return hidden_states
 
     return full_skip_forward

@@ -207,59 +207,73 @@ class ActivationCache:
         }
 
 
-def run_single_problem(
-    model, tokenizer, prompt: str,
+def _tokenize_prompts(
+    tokenizer, prompts: List[str], device: torch.device,
+) -> dict:
+    """Tokenize a batch of prompts with left-padding for batched generation."""
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    all_input_ids = []
+    for prompt in prompts:
+        messages = [{"role": "user", "content": prompt}]
+        ids = tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, return_tensors="pt",
+        )
+        if ids.dim() == 1:
+            ids = ids.unsqueeze(0)
+        all_input_ids.append(ids.squeeze(0))
+
+    # Left-pad to same length
+    max_len = max(ids.shape[0] for ids in all_input_ids)
+    padded_ids = []
+    attention_masks = []
+    input_lengths = []
+    for ids in all_input_ids:
+        pad_len = max_len - ids.shape[0]
+        input_lengths.append(ids.shape[0])
+        padded = torch.cat([
+            torch.full((pad_len,), tokenizer.pad_token_id, dtype=ids.dtype),
+            ids,
+        ])
+        mask = torch.cat([
+            torch.zeros(pad_len, dtype=torch.long),
+            torch.ones(ids.shape[0], dtype=torch.long),
+        ])
+        padded_ids.append(padded)
+        attention_masks.append(mask)
+
+    return {
+        "input_ids": torch.stack(padded_ids).to(device),
+        "attention_mask": torch.stack(attention_masks).to(device),
+        "input_lengths": input_lengths,
+    }
+
+
+def run_batch(
+    model, tokenizer, prompts: List[str],
     config: ExperimentConfig,
     num_layers: int,
-    cache: Optional[ActivationCache] = None,
     seed: int = 42,
     temperature: float = 0.6,
     top_p: float = 0.95,
     max_new_tokens: int = 8192,
-) -> Dict[str, Any]:
-    """Run inference on one problem with optional skip and caching.
-
-    Args:
-        model: HuggingFace model.
-        tokenizer: Tokenizer.
-        prompt: Problem prompt.
-        config: Experiment configuration.
-        num_layers: Total transformer layers.
-        cache: ActivationCache for baseline runs (None for skip runs).
-        seed: Random seed.
-        temperature: Sampling temperature.
-        top_p: Nucleus sampling.
-        max_new_tokens: Max generation length.
+) -> List[Dict[str, Any]]:
+    """Run batched inference on multiple prompts with the same config.
 
     Returns:
-        Dict with generation_text, tokens, wall_clock, optional activations.
+        List of result dicts, one per prompt.
     """
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
 
     device = next(model.parameters()).device
-
-    if cache is not None:
-        cache.reset()
-
-    # Tokenize
-    try:
-        if hasattr(tokenizer, 'apply_chat_template') and tokenizer.chat_template:
-            messages = [{"role": "user", "content": prompt}]
-            input_ids = tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, return_tensors="pt",
-            ).to(device)
-            if input_ids.dim() == 1:
-                input_ids = input_ids.unsqueeze(0)
-            inputs = {"input_ids": input_ids, "attention_mask": torch.ones_like(input_ids)}
-        else:
-            raise AttributeError("no chat template")
-    except Exception:
-        encoded = tokenizer(prompt, return_tensors="pt")
-        inputs = {k: v.to(device) for k, v in encoded.items()}
-
-    input_len = inputs["input_ids"].shape[1]
+    tokenized = _tokenize_prompts(tokenizer, prompts, device)
+    input_ids = tokenized["input_ids"]
+    attention_mask = tokenized["attention_mask"]
+    input_lengths = tokenized["input_lengths"]
 
     gen_kwargs = {}
     if temperature > 0:
@@ -271,11 +285,11 @@ def run_single_problem(
 
     start_time = time.time()
 
-    # Apply skip if needed
     if config.is_baseline:
         with torch.no_grad():
             outputs = model.generate(
-                **inputs, max_new_tokens=max_new_tokens,
+                input_ids=input_ids, attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
                 **gen_kwargs, pad_token_id=tokenizer.pad_token_id,
             )
     else:
@@ -286,31 +300,39 @@ def run_single_problem(
         with apply_skip(model, config.skip_type, skip_layers):
             with torch.no_grad():
                 outputs = model.generate(
-                    **inputs, max_new_tokens=max_new_tokens,
+                    input_ids=input_ids, attention_mask=attention_mask,
+                    max_new_tokens=max_new_tokens,
                     **gen_kwargs, pad_token_id=tokenizer.pad_token_id,
                 )
 
-    gen_ids = outputs[0][input_len:]
-    actual_tokens = len(gen_ids)
-    generation_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
     wall_clock = time.time() - start_time
+    total_padded_input = input_ids.shape[1]
 
-    result = {
-        "generation_text": generation_text,
-        "actual_tokens_generated": actual_tokens,
-        "wall_clock_seconds": round(wall_clock, 3),
-    }
+    results = []
+    for i, inp_len in enumerate(input_lengths):
+        # Account for left-padding: actual content starts at (total - inp_len)
+        gen_start = total_padded_input
+        gen_ids = outputs[i][gen_start:]
+        # Strip padding tokens from generated output
+        gen_ids = gen_ids[gen_ids != tokenizer.pad_token_id]
+        actual_tokens = len(gen_ids)
+        generation_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
 
-    if cache is not None:
-        result["activations"] = cache.get_cached_data()
+        result = {
+            "generation_text": generation_text,
+            "actual_tokens_generated": actual_tokens,
+            "wall_clock_seconds": round(wall_clock / len(prompts), 3),
+            "batch_wall_clock_seconds": round(wall_clock, 3),
+            "batch_size": len(prompts),
+        }
+        if not config.is_baseline:
+            result["skip_layers"] = get_skip_layers(
+                num_layers, config.skip_pct,
+                cold_start=4, cold_end=4, strategy="middle",
+            )
+        results.append(result)
 
-    if not config.is_baseline:
-        result["skip_layers"] = get_skip_layers(
-            num_layers, config.skip_pct,
-            cold_start=4, cold_end=4, strategy="middle",
-        )
-
-    return result
+    return results
 
 
 def load_completed_pairs(output_dir: str, model_short: str, benchmark: str) -> set:
@@ -362,6 +384,7 @@ def parse_args():
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--top_p", type=float, default=0.95)
     parser.add_argument("--max_new_tokens", type=int, default=8192)
+    parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--configs", type=str, nargs="*", default=None,
@@ -426,103 +449,129 @@ def main():
         completed = load_completed_pairs(args.output_dir, model_short, args.benchmark)
         logger.info(f"Resuming: {len(completed)} (problem, config) pairs already done")
 
+    batch_size = args.batch_size
+
     # Track per-config accuracy
     config_correct: Dict[str, int] = {c.name: 0 for c in configs_to_run}
     config_total: Dict[str, int] = {c.name: 0 for c in configs_to_run}
 
-    # INTERLEAVED: outer loop = problems, inner loop = configs
+    # BATCHED: outer loop = configs, inner loop = batches of problems
     total_start = time.time()
-    for p_idx, problem in enumerate(problems):
-        pid = problem["problem_id"]
+    for c_idx, config in enumerate(configs_to_run):
+        # Collect problems not yet done for this config
+        todo = [
+            p for p in problems
+            if (p["problem_id"], config.name) not in completed
+        ]
+        if not todo:
+            logger.info(f"\n[{config.name}] all done, skipping")
+            continue
+
         logger.info(f"\n{'='*60}")
-        logger.info(f"PROBLEM [{p_idx+1}/{len(problems)}]: {pid}")
+        logger.info(
+            f"CONFIG [{c_idx+1}/{len(configs_to_run)}]: {config.name} "
+            f"({len(todo)} problems remaining, batch_size={batch_size})"
+        )
         logger.info(f"{'='*60}")
 
-        for config in configs_to_run:
-            if (pid, config.name) in completed:
-                logger.info(f"  [{config.name}] already done, skipping")
-                continue
+        # Set up skip layers once per config
+        skip_layers = None
+        if not config.is_baseline:
+            skip_layers = get_skip_layers(
+                num_layers, config.skip_pct,
+                cold_start=4, cold_end=4, strategy="middle",
+            )
 
-            logger.info(f"  [{config.name}] running...")
+        # Process in batches
+        for batch_start in range(0, len(todo), batch_size):
+            batch = todo[batch_start:batch_start + batch_size]
+            batch_prompts = [p["prompt"] for p in batch]
+            batch_num = batch_start // batch_size + 1
+            total_batches = (len(todo) + batch_size - 1) // batch_size
+
+            logger.info(
+                f"  Batch {batch_num}/{total_batches} "
+                f"({len(batch)} problems)..."
+            )
+
             try:
-                use_cache = config.is_baseline
-                if use_cache:
-                    act_cache.install_hooks()
-                result = run_single_problem(
-                    model, tokenizer, problem["prompt"], config,
-                    num_layers,
-                    cache=act_cache if use_cache else None,
-                    seed=args.seed, temperature=args.temperature,
+                results = run_batch(
+                    model, tokenizer, batch_prompts, config,
+                    num_layers, seed=args.seed,
+                    temperature=args.temperature,
                     top_p=args.top_p,
                     max_new_tokens=args.max_new_tokens,
                 )
-                if use_cache:
-                    act_cache.remove_hooks()
             except Exception as e:
-                logger.error(f"    CRASH on {config.name}/{pid}: {e}")
+                logger.error(f"    BATCH CRASH on {config.name}: {e}")
                 continue
 
-            extracted = extract_answer(
-                result["generation_text"], bench_type
-            )
-            is_correct = check_answer_correct(
-                extracted, problem["ground_truth"], bench_type
-            )
-            accuracy = 1 if is_correct else 0
-            config_total[config.name] += 1
-            config_correct[config.name] += accuracy
+            # Process each result in the batch
+            for i, (problem, result) in enumerate(zip(batch, results)):
+                pid = problem["problem_id"]
+                extracted = extract_answer(
+                    result["generation_text"], bench_type
+                )
+                is_correct = check_answer_correct(
+                    extracted, problem["ground_truth"], bench_type
+                )
+                accuracy = 1 if is_correct else 0
+                config_total[config.name] += 1
+                config_correct[config.name] += accuracy
 
-            record = {
-                "problem_id": pid,
-                "config": config.name,
-                "model": hf_name,
-                "benchmark": args.benchmark,
-                "skip_type": config.skip_type,
-                "skip_pct": config.skip_pct,
-                "flop_reduction_pct": config.flop_reduction_pct,
-                "accuracy": accuracy,
-                "extracted_answer": extracted,
-                "ground_truth": problem["ground_truth"],
-                "actual_tokens_generated":
-                    result["actual_tokens_generated"],
-                "wall_clock_seconds": result["wall_clock_seconds"],
-                "generation_text": result["generation_text"],
-                "seed": args.seed,
-                "timestamp": time.strftime(
-                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
-                ),
-            }
-            if "activations" in result:
-                record["activations"] = result["activations"]
-            if "skip_layers" in result:
-                record["skip_layers"] = result["skip_layers"]
+                record = {
+                    "problem_id": pid,
+                    "config": config.name,
+                    "model": hf_name,
+                    "benchmark": args.benchmark,
+                    "skip_type": config.skip_type,
+                    "skip_pct": config.skip_pct,
+                    "flop_reduction_pct": config.flop_reduction_pct,
+                    "accuracy": accuracy,
+                    "extracted_answer": extracted,
+                    "ground_truth": problem["ground_truth"],
+                    "actual_tokens_generated":
+                        result["actual_tokens_generated"],
+                    "wall_clock_seconds": result["wall_clock_seconds"],
+                    "batch_wall_clock_seconds":
+                        result.get("batch_wall_clock_seconds"),
+                    "batch_size": result.get("batch_size"),
+                    "generation_text": result["generation_text"],
+                    "seed": args.seed,
+                    "timestamp": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                    ),
+                }
+                if "skip_layers" in result:
+                    record["skip_layers"] = result["skip_layers"]
 
-            append_result(
-                args.output_dir, model_short, args.benchmark,
-                config, record,
-            )
+                append_result(
+                    args.output_dir, model_short, args.benchmark,
+                    config, record,
+                )
 
-            running_acc = (
-                config_correct[config.name]
-                / config_total[config.name] * 100
-            )
-            logger.info(
-                f"    {'✓' if accuracy else '✗'} | "
-                f"Ans: {extracted} | "
-                f"GT: {problem['ground_truth']} | "
-                f"Tok: {result['actual_tokens_generated']} | "
-                f"Time: {result['wall_clock_seconds']:.1f}s | "
-                f"RunAcc: {running_acc:.1f}%"
-            )
+                running_acc = (
+                    config_correct[config.name]
+                    / config_total[config.name] * 100
+                )
+                logger.info(
+                    f"    {'✓' if accuracy else '✗'} {pid} | "
+                    f"Ans: {extracted} | "
+                    f"GT: {problem['ground_truth']} | "
+                    f"Tok: {result['actual_tokens_generated']} | "
+                    f"Time: {result['wall_clock_seconds']:.1f}s | "
+                    f"Acc: {running_acc:.1f}%"
+                )
 
-        # Summary after each problem
+        # Summary after each config
         elapsed = time.time() - total_start
-        logger.info(f"\n  --- After {p_idx+1} problems ({elapsed/60:.1f} min) ---")
-        for config in configs_to_run:
-            t = config_total[config.name]
-            if t > 0:
-                acc = config_correct[config.name] / t * 100
-                logger.info(f"    {config.name}: {acc:.1f}% ({t} done)")
+        t = config_total[config.name]
+        if t > 0:
+            acc = config_correct[config.name] / t * 100
+            logger.info(
+                f"\n  {config.name}: {acc:.1f}% "
+                f"({t} done, {elapsed/60:.1f} min elapsed)"
+            )
 
     # Cleanup
     act_cache.remove_hooks()

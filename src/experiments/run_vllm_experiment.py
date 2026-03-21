@@ -132,37 +132,40 @@ def _patch_model_for_config(
 
             def make_skip(orig):
                 def skipped(hidden_states):
+                    # Only skip during decode (1 token per seq), not
+                    # prefill (many tokens). Prefill must run full model
+                    # to build correct hidden representations.
+                    if hidden_states.shape[0] > 1:
+                        return orig(hidden_states)
                     return torch.zeros_like(hidden_states)
                 return skipped
 
             mlp.forward = make_skip(original)
 
         elif config.skip_type == "attention_only":
-            # vLLM attention: forward(positions, hidden_states) -> Tensor
             attn = _find_submodule(layer, ['self_attn', 'attention', 'attn'])
             original = attn.forward
 
             def make_attn_skip(orig):
                 def skipped(positions, hidden_states, *args, **kwargs):
+                    if hidden_states.shape[0] > 1:
+                        return orig(positions, hidden_states, *args, **kwargs)
                     return torch.zeros_like(hidden_states)
                 return skipped
 
             attn.forward = make_attn_skip(original)
 
         elif config.skip_type == "full_layer":
-            # vLLM layer: forward(positions, hidden_states, residual)
-            #   -> tuple[Tensor, Tensor]
             original = layer.forward
 
             def make_layer_skip(orig):
                 def skipped(positions, hidden_states, residual, *args, **kwargs):
-                    # In vLLM's residual pattern, the caller does:
-                    #   hidden, residual = layer(pos, hidden, residual)
-                    # For first layer residual=None; layer inits it.
-                    # To skip: just pass through unchanged.
+                    if hidden_states.shape[0] > 1:
+                        return orig(
+                            positions, hidden_states, residual,
+                            *args, **kwargs,
+                        )
                     if residual is None:
-                        # First layer: init residual = hidden, hidden = 0
-                        # (matches what a real layer does before adding)
                         return hidden_states, hidden_states
                     return hidden_states, residual
                 return skipped

@@ -67,7 +67,7 @@ def run_problems(llm, problems, label: str):
     )
     results = []
     for p in problems:
-        prompt = p["problem"]
+        prompt = p["prompt"]
         messages = [{"role": "user", "content": prompt}]
         t0 = time.time()
         out = llm.chat([messages], params, use_tqdm=False)
@@ -75,12 +75,12 @@ def run_problems(llm, problems, label: str):
         text = out[0].outputs[0].text
         n_tokens = len(out[0].outputs[0].token_ids)
         extracted = extract_answer(text, "math")
-        correct = check_answer_correct(extracted, p["answer"], "math")
+        correct = check_answer_correct(extracted, p["ground_truth"], "math")
 
         results.append({
             "label": label,
-            "problem_id": p.get("id", "?"),
-            "ground_truth": p["answer"],
+            "problem_id": p.get("problem_id", "?"),
+            "ground_truth": p["ground_truth"],
             "extracted": extracted,
             "correct": correct,
             "n_tokens": n_tokens,

@@ -22,7 +22,7 @@ from src.experiments.run_vllm_experiment import (
     _find_submodule,
     _find_vllm_model,
 )
-from src.infrastructure.generation import extract_answer, check_answer
+from src.infrastructure.generation import extract_answer, check_answer_correct
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -75,7 +75,7 @@ def run_problems(llm, problems, label: str):
         text = out[0].outputs[0].text
         n_tokens = len(out[0].outputs[0].token_ids)
         extracted = extract_answer(text, "math")
-        correct = check_answer(extracted, p["answer"], "math")
+        correct = check_answer_correct(extracted, p["answer"], "math")
 
         results.append({
             "label": label,

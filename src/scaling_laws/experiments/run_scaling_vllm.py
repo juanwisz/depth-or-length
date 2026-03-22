@@ -221,11 +221,25 @@ def main() -> None:
         enforce_eager=False,
     )
 
-    # Get param count from vLLM model
-    param_count = sum(
-        p.numel() for p in
-        llm.llm_engine.model_executor.driver_worker.model_runner.model.parameters()
-    )
+    # Get param count from model config (avoids vLLM internal API changes)
+    PARAM_COUNTS = {
+        "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B": 1_500_000_000,
+        "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B": 7_000_000_000,
+        "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B": 14_000_000_000,
+        "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B": 32_000_000_000,
+        "deepseek-ai/DeepSeek-R1-Distill-Llama-8B": 8_000_000_000,
+        "Qwen/Qwen3-1.7B": 1_700_000_000,
+        "Qwen/Qwen3-8B": 8_000_000_000,
+        "Qwen/Qwen3-14B": 14_000_000_000,
+        "Qwen/Qwen3-32B": 32_000_000_000,
+        "Qwen/Qwen2.5-1.5B-Instruct": 1_500_000_000,
+        "Qwen/Qwen2.5-7B-Instruct": 7_000_000_000,
+        "Qwen/Qwen2.5-14B-Instruct": 14_000_000_000,
+        "Qwen/Qwen2.5-32B-Instruct": 32_000_000_000,
+    }
+    param_count = PARAM_COUNTS.get(config.model_id, 0)
+    if param_count == 0:
+        logger.warning(f"Unknown model {config.model_id}, using 0 for param_count")
     logger.info(f"Parameters: {param_count:,} ({param_count/1e9:.1f}B)")
 
     # Save metadata
